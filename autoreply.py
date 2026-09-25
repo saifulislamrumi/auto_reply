@@ -318,10 +318,10 @@ def gmail_service():
 
 
 def label_id(gmail, name: str) -> str:
-    for label in gmail.users().labels().list(userId="me").execute()["labels"]:
+    for label in gmail.users().labels().list(userId="me").execute(num_retries=3)["labels"]:
         if label["name"] == name:
             return label["id"]
-    return gmail.users().labels().create(userId="me", body={"name": name}).execute()["id"]
+    return gmail.users().labels().create(userId="me", body={"name": name}).execute(num_retries=3)["id"]
 
 
 def decide(thread_text: str) -> Decision | None:
@@ -371,8 +371,8 @@ def send_reply(gmail, message: dict, h: dict, text: str):
 
 
 def handle(gmail, labels: dict, msg_id: str):
-    message = gmail.users().messages().get(userId="me", id=msg_id).execute()
-    thread = gmail.users().threads().get(userId="me", id=message["threadId"]).execute()
+    message = gmail.users().messages().get(userId="me", id=msg_id).execute(num_retries=3)
+    thread = gmail.users().threads().get(userId="me", id=message["threadId"]).execute(num_retries=3)
     h = headers_of(message)
 
     if is_automated(h) or thread["messages"][-1]["id"] != msg_id:
@@ -390,13 +390,18 @@ def handle(gmail, labels: dict, msg_id: str):
     if DRY_RUN:
         return
     if action == "reply":
-        send_reply(gmail, message, h, reply)
+        try:
+            send_reply(gmail, message, h, reply)
+        except Exception:
+            # Unknown whether it went out (e.g. timeout). Hand it to a human rather than risk a double reply.
+            gmail.users().messages().modify(userId="me", id=msg_id, body={"addLabelIds": [labels[FOR_YOU]]}).execute(num_retries=3)
+            raise
     label = {"reply": REPLIED, "skip": SKIPPED, "leave_for_me": FOR_YOU}[action]
-    gmail.users().messages().modify(userId="me", id=msg_id, body={"addLabelIds": [labels[label]]}).execute()
+    gmail.users().messages().modify(userId="me", id=msg_id, body={"addLabelIds": [labels[label]]}).execute(num_retries=3)
 
 
 def run_once(gmail, labels: dict):
-    found = gmail.users().messages().list(userId="me", q=QUERY).execute().get("messages", [])
+    found = gmail.users().messages().list(userId="me", q=QUERY).execute(num_retries=3).get("messages", [])
     print(f"{time.strftime('%H:%M:%S')} checked inbox: {len(found)} new email(s)")
     for m in reversed(found):  # oldest first
         try:
