@@ -397,6 +397,7 @@ def handle(gmail, labels: dict, msg_id: str):
 
 def run_once(gmail, labels: dict):
     found = gmail.users().messages().list(userId="me", q=QUERY).execute().get("messages", [])
+    print(f"{time.strftime('%H:%M:%S')} checked inbox: {len(found)} new email(s)")
     for m in reversed(found):  # oldest first
         try:
             handle(gmail, labels, m["id"])
