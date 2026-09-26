@@ -4,7 +4,8 @@ An email assistant that reads your Gmail inbox, understands each new email with 
 
 - **Replies** to real people: greetings, thanks, congratulations, festival wishes, status updates, confirmations
 - **Skips** company emails: ads, newsletters, notifications, receipts, verification codes
-- **Leaves for you** anything that needs your decision: prices, meetings, deadlines, job offers, files, complaints, sensitive news
+- **Answers meeting requests from your Google Calendar**: "are you free tomorrow at 3pm?" gets a real yes, or three free alternatives
+- **Leaves for you** anything that needs your decision: prices, deadlines, job offers, files, complaints, sensitive news
 
 ## How it works
 
@@ -16,6 +17,9 @@ flowchart LR
     C --> D{Code maps category<br/>to an action}
     D -- skip --> S
     D -- leave_for_me --> F[Label: AI-for-you]
+    D -- calendar --> K{Check free/busy<br/>in Google Calendar}
+    K -- unclear time --> F
+    K -- answer built by code --> R
     D -- reply --> G{Safety checks<br/>on the reply text}
     G -- risky --> F
     G -- safe --> R[Send reply<br/>Label: AI-replied]
@@ -27,11 +31,32 @@ The model doesn't decide whether to reply. It only **labels** the email with one
 
 | Action | Categories |
 |---|---|
+| **calendar** | availability |
 | **reply** | greeting, thanks, praise, wishes, congratulations, support, status_update, confirmation, sharing, introduction, goodbye, apology, good_news |
 | **leave_for_me** | personal_question, favor_request, follow_up, scheduling, invitation, money, work_request, career, send_request, technical_issue, complaint, sensitive_news, rude, official, unclear |
 | **skip** | marketing, newsletter, notification, account_security, service_notice, course_announcement, job_portal, scam |
 
 Every handled email gets a Gmail label, so you can see exactly what the assistant did, and no email is ever processed twice.
+
+## Meeting requests and your calendar
+
+When someone asks to meet or talk, the assistant answers from your Google Calendar:
+
+| Email | Reply |
+|---|---|
+| "Are you free for a call tomorrow at 3pm?" (you're free) | "I'm available on Sunday, 27 September at 3:00 PM (Dhaka time, GMT+6). Looking forward to speaking with you." |
+| "Can we talk on Tuesday at 3pm?" (you're busy) | "Unfortunately I'm not available on Tuesday, 29 September at 3:00 PM, but I'm free on Tuesday, 29 September at 10:00 AM, Wednesday, 30 September at 10:00 AM or Thursday, 1 October at 10:00 AM (Dhaka time, GMT+6)." |
+| "When are you free this week?" | Three free times, spread across different days |
+| "Could we talk on Monday?" | "I'm free on Monday, 28 September at 10:00 AM, 12:00 PM or 2:00 PM" |
+
+**Every date and time in these replies comes from code, not the model.** The model only recognizes that the email is a meeting request; the code reads the day and time from the email text ("tomorrow", "Wednesday", "2 October", "3pm", "11:30"), checks your calendar, and writes the reply. The email is left for you instead when:
+
+- it proposes several times or dates ("Monday 2pm or Wednesday 5pm", "2-3pm")
+- it names a time zone ("10am EST"), or "next Tuesday" (this week or the one after?)
+- the day it mentions can't be found in the text, or the time has passed or is more than 60 days away
+- you have no free time in the window
+
+**Privacy:** the assistant uses the `calendar.freebusy` permission, which only reveals *when* you are busy, never event names, attendees or details. It never adds or changes events; after replying, you add the meeting yourself.
 
 ## Safety
 
@@ -49,6 +74,7 @@ The assistant sends email on your behalf, so there are several layers of protect
 | **Prompt-injection handling** | Email content is treated as data; emails that try to give the model instructions are skipped |
 | **Fail-safe defaults** | If the model's answer is malformed or unclear, the email is left for you |
 | **Fixed format** | The greeting and sign-off are added by code, not the model, so every reply looks the same |
+| **Calendar replies built by code** | Dates and times are read from the email text and checked against your calendar; unclear requests go to you |
 
 ## Requirements
 
@@ -80,7 +106,7 @@ OLLAMA_CONTEXT_LENGTH=16384 ollama serve
 ### 3. Create Google OAuth credentials (one time)
 
 1. Create a project at [console.cloud.google.com](https://console.cloud.google.com/projectcreate).
-2. Enable the [Gmail API](https://console.cloud.google.com/apis/library/gmail.googleapis.com).
+2. Enable the [Gmail API](https://console.cloud.google.com/apis/library/gmail.googleapis.com) and the [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com).
 3. Open **Google Auth Platform**, click **Get started**, and fill in the app name and your email. Choose **External** as the audience.
 4. Under **Audience → Test users**, add your Gmail address.
 5. Under **Clients → Create client**, choose **Desktop app**, click **Create**, then **Download JSON**.
@@ -106,7 +132,7 @@ DRY_RUN=0 .venv/bin/python -u autoreply.py
 .venv/bin/python eval_emails.py
 ```
 
-Run `eval_emails.py` after every prompt change. It prints each decision and reply, the overall score and how varied the replies are. Current result with `qwen2.5:7b`: **51/54 correct, no wrong replies sent**; the 3 misses are automated emails left for you instead of skipped.
+Run `eval_emails.py` after every prompt change. It prints each decision and reply, the overall score and how varied the replies are. Current result with `qwen2.5:7b`: **54/58 correct**. The misses: one marketing email gets a harmless "thanks for sharing" reply (in practice that sender is already filtered by its headers), and three emails are left for you instead of being handled.
 
 Example output:
 
@@ -146,6 +172,8 @@ Emails stay unread, so they still show up in your inbox as usual.
 | `LLM_URL` | environment variable | `http://localhost:11434/v1/chat/completions` (Ollama) |
 | `LLM_MODEL` | environment variable | `qwen2.5:7b-instruct-q4_K_M` |
 | `CHECK_EVERY_SECONDS` | `autoreply.py` | `60` |
+| `MEETING_HOURS` | `autoreply.py` | `(10, 22)`: times offered between 10 AM and 10 PM, any day |
+| `MEETING_MINUTES` | `autoreply.py` | `30`: assumed meeting length when the email doesn't say |
 | `SIGNATURE` | `autoreply.py` | `Best regards,\nSaiful Islam Siam` |
 | `QUERY` | `autoreply.py` | unread Primary emails from the last 2 days |
 
@@ -173,12 +201,14 @@ To change the writing style, the most effective edit is adding or changing an ex
 - A 7B model occasionally adds small made-up details or misses the right tone. A larger model (for example `qwen2.5:14b`) improves quality if your hardware allows it.
 - Emails you open before the next check are treated as handled by you and are not answered.
 - The script runs only while your computer is on.
+- Meeting replies don't add events to your calendar, so two people could be offered the same free time before you add either meeting.
 
 ## Privacy
 
 - Emails are processed only by the local model on your machine.
 - `credentials.json` and `token.json` give access to your mailbox. They are listed in `.gitignore`; never share or commit them.
 - The app uses the `gmail.modify` scope, which lets it read, label and send email. It cannot permanently delete email.
+- The `calendar.freebusy` scope only shows when you're busy. Event names and details stay private.
 
 ## Project structure
 

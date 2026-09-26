@@ -8,7 +8,7 @@ import sys
 
 import autoreply as a
 
-R, L, S = "reply", "leave_for_me", "skip"
+R, L, S, C = "reply", "leave_for_me", "skip", "calendar"
 
 
 def email(frm, subject, body, to="Saiful Islam Siam <saifulislamsiam066@gmail.com>"):
@@ -52,7 +52,12 @@ CASES = [
     ("question: plans", L, email("Mohaiminul <mohaiminul@gmail.com>", "plan", "What's your plan after this semester?")),
     ("favor: help", L, email("Nabil <nabil@gmail.com>", "help", "Can you review my CV and give some feedback?")),
     ("follow-up: pending", L, email("Les <les@client.com>", "Re: homepage", "Any update on the homepage changes?")),
-    ("meeting: request", L, email("Ana <ana@startup.io>", "Call?", "Hi Saiful, are you free for a call tomorrow at 3pm?")),
+    # --- calendar: meeting and call requests
+    ("meeting: specific time", C, email("Ana <ana@startup.io>", "Call?", "Hi Saiful, are you free for a call tomorrow at 3pm?")),
+    ("meeting: open question", C, email("Emma Clarke <emma@brightco.com>", "catch up", "Would be great to catch up this week. When are you free?")),
+    ("meeting: weekday", C, email("Maya Chen <maya@northwind.io>", "sync", "Could we do a quick sync on Monday?")),
+    ("meeting: date", C, email("Nadia <nadia@gmail.com>", "video call", "Can we have a video call on 2 October at 4pm?")),
+    ("deadline: not calendar", L, email("Les <les@client.com>", "homepage", "When will the homepage be ready?")),
     ("invitation: wedding", L, email("Tasnim <tasnim@gmail.com>", "Invitation", "My wedding reception is next month, you must come! Let me know.")),
     ("money: quote", L, email("Les <les@client.com>", "Quote", "How much would a 5-page website cost?")),
     ("money: payment issue", L, email("Les <les@client.com>", "Payment", "The payment didn't go through on my side, can you check your account details?")),
@@ -64,7 +69,7 @@ CASES = [
     ("complaint: client", L, email("Omar <omar@client.io>", "Disappointed", "Honestly I'm disappointed, the last delivery had a lot of issues.")),
     ("sensitive: death", L, email("Rafi <rafi@gmail.com>", "news", "Bhai, my father passed away last night. Please keep us in your prayers.")),
     ("rude: insult", L, email("Fahim Faiyaz <faiyazfahim743@gmail.com>", "Hagu Rumi", "Hagu Rumi")),
-    ("official: university", L, email("Dr. Kamal Hossain <kamal@iiuc.ac.bd>", "Thesis", "Saiful, please meet me regarding your thesis submission.")),
+    ("official: university (not calendar)", L, email("Dr. Kamal Hossain <kamal@iiuc.ac.bd>", "Thesis", "Saiful, please meet me regarding your thesis submission.")),
     # --- skip: automated, including ones that look personal
     ("skip: founder welcome", S, email("Zeno Rocha <zeno.rocha@resend.com>", "Welcome to Resend!", "Hey Saiful, I'm Zeno, founder of Resend. Thanks for signing up, reply and tell me what you're building!")),
     ("skip: service paused", S, email("ant.wilson@supabase.com", "Your Supabase Project chatbot has been paused.", "Hi Saiful, your project chatbot has been paused due to inactivity. Restore it from the dashboard.")),
@@ -90,6 +95,8 @@ def main():
         if d and d.action == R:
             replies.append(d.body)
             print("   " + d.reply.replace("\n", "\n   "))
+        elif d and d.action == C:
+            print("   -> answered from the calendar (see: autoreply.py --test for the calendar logic)")
         elif d:
             print(f"   why: {d.reason}")
     openings = {" ".join(b.split()[:3]).lower() for b in replies}
