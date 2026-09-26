@@ -12,18 +12,26 @@ An email assistant that reads your Gmail inbox, understands each new email with 
 flowchart LR
     A[New unread email<br/>in Primary inbox] --> B{Automated sender?<br/>no-reply, mailing list,<br/>auto-responder}
     B -- yes --> S[Label: AI-skipped]
-    B -- no --> C[Local LLM reads<br/>the whole thread]
-    C --> D{Decision}
+    B -- no --> C[Local LLM labels the email<br/>with one of 36 categories]
+    C --> D{Code maps category<br/>to an action}
     D -- skip --> S
     D -- leave_for_me --> F[Label: AI-for-you]
-    D -- reply --> G{Safety check<br/>on the reply text}
+    D -- reply --> G{Safety checks<br/>on the reply text}
     G -- risky --> F
     G -- safe --> R[Send reply<br/>Label: AI-replied]
 ```
 
-Every minute the script checks for new unread emails in your **Primary** tab. Gmail's own categories already filter out most promotions and social emails. Headers such as `List-Unsubscribe` and `Auto-Submitted` catch the rest of the automated mail before the model sees it.
+Every minute the script checks for new unread emails in your **Primary** tab. Gmail's own categories already filter out most promotions and social emails. Headers such as `List-Unsubscribe` and `Auto-Submitted`, plus subjects like "verification code" or "password reset", catch the rest of the automated mail before the model sees it.
 
-The model returns a structured decision (`reply`, `skip` or `leave_for_me`) with a short reason. Every handled email gets a Gmail label, so you can see exactly what the assistant did, and no email is ever processed twice.
+The model doesn't decide whether to reply. It only **labels** the email with one category, and the code maps that category to an action. A small model picks a concrete label far more reliably than it applies abstract "should I reply?" rules:
+
+| Action | Categories |
+|---|---|
+| **reply** | greeting, thanks, praise, wishes, congratulations, support, status_update, confirmation, sharing, introduction, goodbye, apology, good_news |
+| **leave_for_me** | personal_question, favor_request, follow_up, scheduling, invitation, money, work_request, career, send_request, technical_issue, complaint, sensitive_news, rude, official, unclear |
+| **skip** | marketing, newsletter, notification, account_security, service_notice, course_announcement, job_portal, scam |
+
+Every handled email gets a Gmail label, so you can see exactly what the assistant did, and no email is ever processed twice.
 
 ## Safety
 
@@ -32,7 +40,9 @@ The assistant sends email on your behalf, so there are several layers of protect
 | Protection | What it prevents |
 |---|---|
 | **Dry run by default** | Nothing is sent unless you explicitly set `DRY_RUN=0` |
+| **Category decides, not the model** | A condolence, job offer or bug report can't get an automatic reply once it's labeled correctly |
 | **Code-level reply filter** | Replies mentioning numbers, dates, times, money, meetings, calls, availability or personal details are blocked and left for you, whatever the model decided |
+| **No made-up facts** | Replies claiming what you're working on, mentioning an occasion the email never mentioned, or echoing a prompt example are blocked |
 | **No questions** | Questions are removed from replies, so the assistant never asks for information on your behalf |
 | **One auto-reply per thread** | Two automated systems can't get stuck replying to each other |
 | **Automated-sender detection** | No replies to `noreply` addresses, mailing lists or auto-responders |
@@ -91,7 +101,12 @@ DRY_RUN=0 .venv/bin/python -u autoreply.py
 
 # Self-check of the filtering and safety logic (no Gmail or LLM needed)
 .venv/bin/python autoreply.py --test
+
+# Quality check: 54 sample emails through the real model, scored (needs Ollama, sends nothing)
+.venv/bin/python eval_emails.py
 ```
+
+Run `eval_emails.py` after every prompt change. It prints each decision and reply, the overall score and how varied the replies are. Current result with `qwen2.5:7b`: **51/54 correct, no wrong replies sent**; the 3 misses are automated emails left for you instead of skipped.
 
 Example output:
 
@@ -145,11 +160,11 @@ LLM_URL=http://localhost:1234/v1/chat/completions LLM_MODEL=<model-name> DRY_RUN
 The assistant's behavior is defined by the `SYSTEM` prompt in `autoreply.py`:
 
 - **Role:** whose inbox it is and which names people use
-- **Decision rules:** which kinds of email to reply to, skip or leave for you
+- **Categories:** what each of the 36 categories means, including "NOT this" notes for common mix-ups
 - **Writing style:** tone, length and formatting rules
 - **Examples:** sample emails with ideal replies; the model imitates these closely
 
-To change the writing style, the most effective edit is adding or changing an example. The code-level safety filter (`RISKY` in `autoreply.py`) always applies, whatever the prompt says.
+To change the writing style, the most effective edit is adding or changing an example. To change what happens to a category (for example, to stop auto-replying to `status_update`), move it between lists in `ACTIONS` in `autoreply.py`. The code-level safety filters (`RISKY`, `INVENTED`, `OCCASIONS`) always apply, whatever the prompt says.
 
 ## Limitations
 
@@ -169,6 +184,7 @@ To change the writing style, the most effective edit is adding or changing an ex
 
 ```
 autoreply.py       # the whole pipeline: Gmail, LLM decision, safety filter, reply
+eval_emails.py     # 54 sample emails to measure reply quality after changes
 requirements.txt   # Python dependencies
 credentials.json   # your Google OAuth client (not committed)
 token.json         # your saved Gmail login (not committed)
