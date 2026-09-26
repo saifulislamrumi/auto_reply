@@ -12,7 +12,7 @@ R, L, S, C = "reply", "leave_for_me", "skip", "calendar"
 
 
 def email(frm, subject, body, to="Saiful Islam Siam <saifulislamsiam066@gmail.com>"):
-    return f"From: {frm}\nTo: {to}\nSubject: {subject}\n\n{body}"
+    return f"<latest_email>\nFrom: {frm}\nTo: {to}\nSubject: {subject}\n\n{body}\n</latest_email>"
 
 
 CASES = [

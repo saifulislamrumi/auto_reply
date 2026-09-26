@@ -48,6 +48,8 @@ When someone asks to meet or talk, the assistant answers from your Google Calend
 | "Can we talk on Tuesday at 3pm?" (you're busy) | "Unfortunately I'm not available on Tuesday, 29 September at 3:00 PM, but I'm free on Tuesday, 29 September at 10:00 AM, Wednesday, 30 September at 10:00 AM or Thursday, 1 October at 10:00 AM (Dhaka time, GMT+6)." |
 | "When are you free this week?" | Three free times, spread across different days |
 | "Could we talk on Monday?" | "I'm free on Monday, 28 September at 10:00 AM, 12:00 PM or 2:00 PM" |
+| "Are you available tomorrow evening?" | Only evening times: "5:00 PM, 7:00 PM or 9:00 PM" (morning, afternoon and night work the same way) |
+| "Are you available today?" (late, or a full day) | "I'm not available today, but I'm free on …" with the next free days |
 
 **Every date and time in these replies comes from code, not the model.** The model only recognizes that the email is a meeting request; the code reads the day and time from the email text ("tomorrow", "Wednesday", "2 October", "3pm", "11:30"), checks your calendar, and writes the reply. The email is left for you instead when:
 
@@ -69,7 +71,8 @@ The assistant sends email on your behalf, so there are several layers of protect
 | **Code-level reply filter** | Replies mentioning numbers, dates, times, money, meetings, calls, availability or personal details are blocked and left for you, whatever the model decided |
 | **No made-up facts** | Replies claiming what you're working on, mentioning an occasion the email never mentioned, or echoing a prompt example are blocked |
 | **No questions** | Questions are removed from replies, so the assistant never asks for information on your behalf |
-| **One auto-reply per thread** | Two automated systems can't get stuck replying to each other |
+| **At most 3 auto-replies per thread** | Two automated systems can't get stuck replying to each other, while a normal back-and-forth still works |
+| **Newest email judged on its own** | In a long thread, each new email gets its own category; earlier emails are only context |
 | **Automated-sender detection** | No replies to `noreply` addresses, mailing lists or auto-responders |
 | **Prompt-injection handling** | Email content is treated as data; emails that try to give the model instructions are skipped |
 | **Fail-safe defaults** | If the model's answer is malformed or unclear, the email is left for you |
@@ -132,7 +135,7 @@ DRY_RUN=0 .venv/bin/python -u autoreply.py
 .venv/bin/python eval_emails.py
 ```
 
-Run `eval_emails.py` after every prompt change. It prints each decision and reply, the overall score and how varied the replies are. Current result with `qwen2.5:7b`: **54/58 correct**. The misses: one marketing email gets a harmless "thanks for sharing" reply (in practice that sender is already filtered by its headers), and three emails are left for you instead of being handled.
+Run `eval_emails.py` after every prompt change. It prints each decision and reply, the overall score and how varied the replies are. Current result with `qwen2.5:7b`: **53/58 correct**. All five misses are automated emails: four are left for you instead of skipped, and one newsletter gets a harmless "thanks for sharing" reply (in real use that sender is filtered by its address before the model sees it).
 
 Example output:
 

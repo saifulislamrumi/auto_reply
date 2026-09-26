@@ -33,6 +33,7 @@ LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 MEETING_HOURS = (10, 22)  # meetings are only offered between 10:00 and 22:00 local time, any day
 MEETING_MINUTES = 30  # assumed length when the email doesn't say
+MAX_AUTO_REPLIES_PER_THREAD = 3  # stops two bots replying to each other forever, allows a normal chat
 
 # Labels double as the "already handled" memory: anything labeled is never processed again.
 REPLIED, SKIPPED, FOR_YOU = "AI-replied", "AI-skipped", "AI-for-you"
@@ -54,8 +55,9 @@ what to do with it. When you reply, you write as Saiful, in first person.
 - Recruiters, companies and services: usually automated or mass emails.
 
 # Step 1: pick the category
-Look only at the LAST email in the thread. Earlier emails are context. Use the From, To and \
-Cc lines too. Pick the ONE category below that fits best. What happens next (reply, skip, or \
+Judge ONLY the email inside <latest_email>. <earlier_emails> are background context: \
+never label the latest email by an earlier email's topic. Each new email in a conversation \
+can be a different category. Use the From, To and Cc lines too. Pick the ONE category below that fits best. What happens next (reply, skip, or \
 leave it for Saiful) is decided automatically from the category, so label honestly: never \
 pick a reply category for an email that needs Saiful's own answer.
 
@@ -608,7 +610,8 @@ def is_automated(headers: dict) -> bool:
     return (
         SYSTEM_SUBJECT.search(headers.get("subject", "")) is not None
         or any(w in sender for w in ("noreply", "no-reply", "donotreply", "do-not-reply",
-                                     "mailer-daemon", "notifications@", "notification@"))
+                                     "mailer-daemon", "notifications@", "notification@",
+                                     "subscriptions@", "newsletter", "digest@", "marketing@"))
         or headers.get("auto-submitted", "no").lower() != "no"
         or "list-unsubscribe" in headers or "list-id" in headers
         or headers.get("precedence", "").lower() in ("bulk", "list", "junk")
@@ -628,24 +631,31 @@ def headers_of(message: dict) -> dict:
     return {h["name"].lower(): h["value"] for h in message["payload"]["headers"]}
 
 
-def latest_text(message: dict) -> str:
-    """The newest message without quoted history, so old times in the thread can't confuse the calendar step."""
-    h = headers_of(message)
+def own_words(message: dict) -> str:
+    """A message's text without the quoted history below it (Gmail wraps "On ... wrote:" over two lines)."""
     text = body_text(message["payload"]) or message.get("snippet", "")
-    text = re.split(r"\n\s*On .{5,200}wrote:\s*\n", text, maxsplit=1)[0]
-    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
-    return f"From: {h.get('from')}\nSubject: {h.get('subject')}\n\n{text.strip()}"
+    text = re.split(r"\n\s*On [^\n]{5,200}(?:\n[^\n]{0,200})?wrote:", text, maxsplit=1)[0]
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">")).strip()
+
+
+def latest_text(message: dict) -> str:
+    """The newest message only, so old times in the thread can't confuse the calendar step."""
+    h = headers_of(message)
+    return f"From: {h.get('from')}\nSubject: {h.get('subject')}\n\n{own_words(message)}"
 
 
 def thread_as_text(thread: dict) -> str:
-    parts = []
-    for m in thread["messages"]:
+    """The newest email clearly separated from a few earlier ones, so the model judges the newest one.
+    Given one long thread, a small model otherwise labels every email by the first topic it saw."""
+    def fmt(m):
         h = headers_of(m)
-        text = body_text(m["payload"]) or m.get("snippet", "")
         cc = f"\nCc: {h['cc']}" if h.get("cc") else ""
-        parts.append(f"From: {h.get('from')}\nTo: {h.get('to')}{cc}\nDate: {h.get('date')}\n"
-                     f"Subject: {h.get('subject')}\n\n{text}")
-    return "\n\n---\n\n".join(parts)
+        return (f"From: {h.get('from')}\nTo: {h.get('to')}{cc}\nDate: {h.get('date')}\n"
+                f"Subject: {h.get('subject')}\n\n{own_words(m)}")
+    *earlier, latest = thread["messages"]
+    context = "\n\n---\n\n".join(fmt(m) for m in earlier[-3:])
+    return (f"<earlier_emails>\n{context}\n</earlier_emails>\n\n" if context else "") + \
+        f"<latest_email>\n{fmt(latest)}\n</latest_email>"
 
 
 def google_creds():
@@ -700,6 +710,18 @@ def decide(thread_text: str) -> Decision | None:
     return parse_decision(ask_llm(SYSTEM, thread_text, LLMOutput), thread_text)
 
 
+# The model often files "are you free tomorrow?" under scheduling (deadlines). Words decide it instead;
+# the calendar step still hands anything unclear to a human.
+ASKS_AVAILABILITY = re.compile(r"\b(available|availability|free|schedule|call|talk|chat|catch up|"
+                               r"zoom|google meet|video call)\b", re.IGNORECASE)
+ASKS_DELIVERY = re.compile(r"\b(ready|finish|finished|deliver|delivery|deadline|done|complete|completed|launch|"
+                           r"submit|release)\b", re.IGNORECASE)
+
+
+def latest_part(email_text: str) -> str:
+    return email_text.split("<latest_email>")[-1].split("</latest_email>")[0]
+
+
 def extract_json(content: str) -> str:
     return content[content.find("{"):content.rfind("}") + 1]
 
@@ -710,6 +732,9 @@ def parse_decision(content: str, email_text: str = "") -> Decision | None:
         out = LLMOutput.model_validate_json(extract_json(content))
     except ValidationError:
         return None
+    latest = latest_part(email_text)
+    if out.category == "scheduling" and ASKS_AVAILABILITY.search(latest) and not ASKS_DELIVERY.search(latest):
+        out.category = "availability"
     d = Decision(action=ACTION_OF[out.category], reason=f"{out.category}: {out.reason}",
                  first_name=out.first_name, body=out.body)
     if d.action != "reply":
@@ -843,18 +868,29 @@ def is_free(start: datetime, end: datetime, busy: list) -> bool:
     return all(end <= b_start or start >= b_end for b_start, b_end in busy)
 
 
-def in_meeting_hours(start: datetime, end: datetime) -> bool:
-    day_end = datetime.combine(start.date(), dtime(MEETING_HOURS[1]), start.tzinfo)
-    return start.hour >= MEETING_HOURS[0] and end <= day_end
+def in_meeting_hours(start: datetime, end: datetime, hours: tuple = MEETING_HOURS) -> bool:
+    day_end = datetime.combine(start.date(), dtime(hours[1]), start.tzinfo)
+    return start.hour >= hours[0] and end <= day_end
 
 
-def free_slots(busy: list, first: date, last: date, minutes: int, now: datetime, limit: int = 3) -> list:
+# "tomorrow evening" should never be answered with 10 AM.
+PART_OF_DAY = [("morning", (10, 12)), ("afternoon", (12, 17)), ("evening", (17, 22)), ("tonight", (17, 22)),
+               ("night", (19, 22))]
+
+
+def hours_for(text: str) -> tuple:
+    found = [hours for word, hours in PART_OF_DAY if re.search(rf"\b{word}\b", text, re.IGNORECASE)]
+    return found[0] if len(found) == 1 else MEETING_HOURS
+
+
+def free_slots(busy: list, first: date, last: date, minutes: int, now: datetime, limit: int = 3,
+               hours: tuple = MEETING_HOURS) -> list:
     """Up to `limit` free start times, spread over the days and at least 2 hours apart."""
     n_days = (last - first).days + 1
     per_day, slots, day = max(1, limit // n_days), [], first
     while day <= last and len(slots) < limit:
-        t, taken = datetime.combine(day, dtime(MEETING_HOURS[0]), now.tzinfo), 0
-        while in_meeting_hours(t, t + timedelta(minutes=minutes)) and taken < per_day and len(slots) < limit:
+        t, taken = datetime.combine(day, dtime(hours[0]), now.tzinfo), 0
+        while in_meeting_hours(t, t + timedelta(minutes=minutes), hours) and taken < per_day and len(slots) < limit:
             if t >= now + timedelta(hours=2) and is_free(t, t + timedelta(minutes=minutes), busy):
                 slots.append(t)
                 taken += 1
@@ -900,12 +936,16 @@ def calendar_reply(get_busy, email_text: str, d: Decision, now: datetime | None 
         return leave(days)
     first, last = days
     minutes = tr.duration_minutes if 15 <= tr.duration_minutes <= 180 else MEETING_MINUTES
+    hours = hours_for(email_text)
     start = None
-    if tr.kind == "specific_time" and clock and first == last:
+    if clock and first == last:  # one day and one clock time written: that exact slot, whatever the model said
         start = datetime.combine(first, dtime.fromisoformat(clock.pop()), now.tzinfo)
         last = first + timedelta(days=3)  # alternatives if busy: that day and the next few
+    asked_day = first if not start and first == last else None
     if not (now.date() <= first <= last <= now.date() + timedelta(days=60)) or (start and start <= now):
         return leave("time is in the past or too far ahead")
+    if asked_day:  # one day asked about: look a few days further in case that day is full
+        last = first + timedelta(days=3)
     busy = get_busy(datetime.combine(first, dtime(0), now.tzinfo),
                     datetime.combine(last + timedelta(days=1), dtime(0), now.tzinfo))
 
@@ -914,11 +954,16 @@ def calendar_reply(get_busy, email_text: str, d: Decision, now: datetime | None 
         body = (f"Thank you for reaching out. I'm available on {when(start)} ({tz_label}). "
                 f"Looking forward to speaking with you.")
     else:
-        slots = free_slots(busy, first, last, minutes, now)
+        slots = free_slots(busy, first, asked_day or last, minutes, now, hours=hours)
+        day_is_full = asked_day and not slots
+        if day_is_full:
+            slots = free_slots(busy, first + timedelta(1), last, minutes, now, hours=hours)
         if not slots:
             return leave("no free time found")
         options = "That time works for me" if len(slots) == 1 else "Any of those would work for me"
+        day_name = "today" if asked_day == now.date() else f"on {asked_day:%A, %-d %B}" if asked_day else ""
         opening = (f"Unfortunately I'm not available on {when(start)}, but I'm free on" if start
+                   else f"Thank you for reaching out. I'm not available {day_name}, but I'm free on" if day_is_full
                    else "Thank you for reaching out. I'm free on")
         body = f"{opening} {listing(slots)} ({tz_label}). {options}."
     return Decision(action="reply", reason=f"{d.reason} [from calendar]", first_name=d.first_name, body=body)
@@ -951,9 +996,8 @@ def handle(gmail, calendar, labels: dict, msg_id: str):
 
     if is_automated(h) or thread["messages"][-1]["id"] != msg_id:
         action, reason, reply = "skip", "automated sender or newer message in thread", ""
-    elif any(labels[REPLIED] in m.get("labelIds", []) for m in thread["messages"]):
-        # One auto-reply per thread: stops two bots replying to each other forever.
-        action, reason, reply = "leave_for_me", "already auto-replied in this thread", ""
+    elif sum(labels[REPLIED] in m.get("labelIds", []) for m in thread["messages"]) >= MAX_AUTO_REPLIES_PER_THREAD:
+        action, reason, reply = "leave_for_me", f"{MAX_AUTO_REPLIES_PER_THREAD} auto-replies already in this thread", ""
     else:
         text = thread_as_text(thread)
         d = decide(text)
@@ -999,6 +1043,7 @@ def self_test():
     assert is_automated({"from": "Programming Hero <web@x.com>", "subject": "OTP for Programming Hero Login"})
     assert is_automated({"from": "Notion <notify@x.so>", "subject": "A new device logged into your account"})
     assert not is_automated({"from": "Les <les@client.com>", "subject": "Re: the new design"})
+    assert is_automated({"from": "Noor Mohammad <subscriptions@medium.com>", "subject": "5 lessons"})
     data = base64.urlsafe_b64encode(b"hello").decode()
     assert body_text({"mimeType": "multipart/alternative", "parts": [
         {"mimeType": "text/html", "body": {"data": "x"}},
@@ -1020,6 +1065,9 @@ def self_test():
     birthday = json.dumps({"category": "wishes", "reason": "x", "first_name": "Mim", "body": "Thank you. Eid Mubarak to you too!"})
     assert parse_decision(birthday, "Happy birthday Rumi!").action == "leave_for_me"
     assert parse_decision(birthday, "Eid Mubarak Rumi!").action == "reply"
+    sched = json.dumps({"category": "scheduling", "reason": "x", "first_name": "", "body": ""})
+    assert parse_decision(sched, "<latest_email>What is your free schedule tomorrow?</latest_email>").action == "calendar"
+    assert parse_decision(sched, "<latest_email>When will the homepage be ready?</latest_email>").action == "leave_for_me"
     assert reply("It was so nice to meet you, looking forward to working together.").action == "reply"
     for risky in ("I'm free tomorrow at 3pm.", "Let's have a call next week.", "It costs $500 in total.",
                   "Hi Les, ", "What is your budget?"):
@@ -1066,6 +1114,13 @@ def calendar_self_test():
         d = run("Video call on 2 October at 4pm?", day="next_week")  # model missed the date: the text wins
         assert "Friday, 2 October at 4:00 PM" in d.body, d.body
         assert "Friday, 2 October at 4:00 PM" in run("Friday 2 October at 4pm?", day="friday").body  # they agree
+        d = run("Are you available tomorrow evening?", kind="open_question", day="tomorrow")
+        assert "Sunday, 27 September at 5:00 PM, 7:00 PM or 9:00 PM" in d.body, d.body  # evening only
+        d = run("Are you available today?", kind="open_question", day="today")  # 2pm: 4pm onwards is left today
+        assert "Saturday, 26 September at 4:00 PM" in d.body, d.body
+        late = now.replace(hour=21, minute=46)
+        d = calendar_reply(lambda start, end: busy, "Are you available today?", asked, late)
+        assert d.body.startswith("Thank you for reaching out. I'm not available today, but I'm free on Sunday"), d.body
         d = run("Could we talk on Tuesday?", kind="open_question", day="tuesday")
         assert "Tuesday, 29 September at 10:00 AM, 12:00 PM or 2:00 PM" in d.body, d.body  # grouped, 3pm busy
         for email, answer in [
@@ -1098,6 +1153,13 @@ def calendar_self_test():
                        "body": {"data": base64.urlsafe_b64encode(
                            b"Tuesday works.\n\nOn Mon, Sep 28 Saiful wrote:\n> free at 3pm or 5pm").decode()}}}
     assert "3pm" not in latest_text(msg) and "Tuesday works." in latest_text(msg)
+    gmail_quote = (b"Siam, what is your free schedule tomorrow?\n\nOn Sat, 26 Sept 2026, 9:58\xe2\x80\xafpm Md Abdullah, "
+                   b"<md@gmail.com>\nwrote:\n\n> Help me, i need 100 taka")
+    msg["payload"]["body"]["data"] = base64.urlsafe_b64encode(gmail_quote).decode()
+    assert latest_text(msg).endswith("\n\nSiam, what is your free schedule tomorrow?"), latest_text(msg)
+    two = {"messages": [msg, msg]}
+    assert thread_as_text(two).count("<latest_email>") == 1 and "<earlier_emails>" in thread_as_text(two)
+    assert hours_for("free tomorrow evening?") == (17, 22) and hours_for("free tomorrow?") == MEETING_HOURS
 
 
 def main():
