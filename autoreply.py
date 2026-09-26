@@ -974,7 +974,9 @@ def handle(gmail, calendar, labels: dict, msg_id: str):
             gmail.users().messages().modify(userId="me", id=msg_id, body={"addLabelIds": [labels[FOR_YOU]]}).execute(num_retries=3)
             raise
     label = {"reply": REPLIED, "skip": SKIPPED, "leave_for_me": FOR_YOU}[action]
-    gmail.users().messages().modify(userId="me", id=msg_id, body={"addLabelIds": [labels[label]]}).execute(num_retries=3)
+    # Replied emails are done, so mark them read; everything else stays unread for you to see.
+    change = {"addLabelIds": [labels[label]], "removeLabelIds": ["UNREAD"] if action == "reply" else []}
+    gmail.users().messages().modify(userId="me", id=msg_id, body=change).execute(num_retries=3)
 
 
 def run_once(gmail, calendar, labels: dict):

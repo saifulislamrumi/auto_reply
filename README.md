@@ -162,7 +162,7 @@ LIVE: replies will be sent.
 | `AI-skipped` | Company or automated email; no reply needed |
 | `AI-for-you` | Needs your personal attention |
 
-Emails stay unread, so they still show up in your inbox as usual.
+Emails the assistant replied to are marked as read. Everything else stays unread, so `AI-for-you` emails still stand out in your inbox.
 
 ## Configuration
 
